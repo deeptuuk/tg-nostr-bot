@@ -19,30 +19,31 @@ A Telegram-Nostr bridge. Each CLI instance bridges a Telegram Bot to the Nostr n
 
 **Message Flow:**
 
-- **TG → Nostr**: Telegram → CLI Webhook → NIP-17 encrypt → WebSocket → Gateway → Relay
-- **Nostr → TG**: Relay → Gateway → decrypt NIP-17 → route by to_npub → WebSocket → CLI → Telegram Bot
+- **TG → Nostr**: Telegram → CLI Webhook → raw text to Gateway via WS → Gateway NIP-17 encrypt → Relay
+- **Nostr → TG**: Relay → Gateway NIP-17 decrypt → raw text to CLI via WS → Telegram Bot
 
 ## Components
 
 ### Gateway
 
-**Responsibility:** WebSocket server + Nostr relay pool manager + key registry
+**Responsibility:** WebSocket server + Nostr relay pool manager + key registry + ALL crypto
 
 - Manages `all_key.json` with all registered npub/nsec pairs
+- **Owns all private keys** — Gateway does NIP-17 encrypt/decrypt for all CLIs
 - Accepts WebSocket connections from multiple CLI instances
 - Subscribes to Nostr relays (kind:1059) for each registered npub on demand
 - Maintains a `npub → WebSocket client` mapping for routing
-- Routes messages: decrypts incoming NIP-17 DM, extracts `to_npub`, looks up the corresponding WS client and forwards
+- Routes messages: decrypts incoming NIP-17 DM, extracts `to_npub`, forwards to the corresponding CLI
 - If `to_npub` has no registered WS client → log warning, drop message
-- Forwards outgoing messages from CLI to relays
+- Encrypts outgoing messages with NIP-17 Gift Wrap, forwards to relays
 
 **CLI:**
 - FastAPI webhook server (receives Telegram updates)
 - WebSocket client (connects to Gateway)
-- Each CLI has one independent npub
+- **No crypto** — pure passthrough: forwards raw text to Gateway, receives raw text back
 - Startup: reads `key.json` → if missing, requests from Gateway → saves locally
-- Encrypts outgoing messages with NIP-17 Gift Wrap, sends to Gateway
-- Decrypts incoming NIP-17 Gift Wrap messages, forwards to Telegram
+- Forwards Telegram messages to Gateway (raw text)
+- Forwards Gateway messages to Telegram (raw text)
 
 ## Project Structure
 
@@ -64,7 +65,6 @@ tg-nostr-bot/
     ├── config.py             # .env loader
     ├── app.py                # FastAPI Webhook (Telegram)
     ├── ws_client.py          # WebSocket client to Gateway
-    ├── nip17_client.py       # NIP-17 encrypt/decrypt wrappers
     ├── key.json              # Local key (persistent across restarts)
     ├── .env.example
     └── requirements.txt
@@ -94,22 +94,21 @@ tg-nostr-bot/
 
 ```
 Telegram webhook (POST /webhook) → CLI app.py
-  → nip17_client.wrap(plaintext, my_nsec, MSG_TO_npub)
-  → ws_client.send({"type": "dm", "to_npub": "...", "content": "..."})
-  → Gateway → relay_client.publish(gift_wrap_event)
+  → ws_client.send({"type": "dm", "to_npub": "...", "content": "raw text"})
+  → Gateway (NIP-17 encrypt with Gateway's stored key) → relay_client.publish(gift_wrap_event)
 ```
 
-`app.py` calls `ws_client.send_dm(to_npub, content)` directly (same process, async). The WS connection is held open for the lifetime of the CLI.
+CLI does NO encryption. Gateway owns all keys and wraps with NIP-17.
 
 ### Incoming Message (Nostr → TG)
 
 ```
-relay_client receives kind:1059 → key_manager.nip17_unwrap(seckey, event)
-  → extract to_npub → websocket_server looks up npub→WS client map
-  → send {"type": "dm", ...} to that WS client
-  → CLI ws_client receives → nip17_client.unwrap()
-  → app.py → Telegram Bot API sendMessage(chat_id, text)
+relay_client receives kind:1059 → Gateway (NIP-17 decrypt)
+  → extract content → send raw text via WS to CLI
+  → CLI ws_client receives → app.py → Telegram Bot API sendMessage(chat_id, text)
 ```
+
+CLI is pure passthrough — no crypto whatsoever.
 
 ## WebSocket Protocol
 
@@ -134,8 +133,8 @@ relay_client receives kind:1059 → key_manager.nip17_unwrap(seckey, event)
 // Key response: returns newly generated npub/nsec
 {"type": "register_done", "npub": "npub1...", "nsec": "nsec1..."}
 
-// Incoming DM: decrypted NIP-17 message from Nostr relay
-{"type": "dm", "from_npub": "npub1...", "to_npub": "npub1...", "content": "hello"}
+// Incoming DM: raw text from Nostr relay (decrypted by Gateway)
+{"type": "dm", "from_npub": "npub1...", "content": "hello"}
 ```
 
 ### Gateway-side Routing
