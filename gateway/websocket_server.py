@@ -66,12 +66,15 @@ class GatewayMessageHandler:
                 self._all_keys = {}
 
     def _save_all_keys(self):
-        """Save all_key.json to disk."""
+        """Save all_key.json to disk atomically: write to tmp then rename."""
+        import os, tempfile
         try:
             path = Path(self._key_path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w") as f:
+            fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".json")
+            with os.fdopen(fd, "w") as f:
                 json.dump(self._all_keys, f, indent=2)
+            os.replace(tmp_path, str(path))
             logger.info(f"[Gateway] Saved {len(self._all_keys)} keys to {self._key_path}")
         except Exception as e:
             logger.error(f"[Gateway] Failed to save {self._key_path}: {e}")
