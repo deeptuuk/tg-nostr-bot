@@ -348,14 +348,16 @@ class WebSocketServer:
                 msg = json.loads(raw)
                 msg_type = msg.get("type", "")
 
-                if msg_type == "pong":
-                    last_ping = time.time()
-                    continue
-
-                # Check pong timeout
+                # Check pong timeout BEFORE processing pong to avoid race condition.
+                # If the timeout has already expired during the recv() call,
+                # close immediately rather than processing a stale pong.
                 if time.time() - last_ping > 10:
                     logger.warning(f"[Gateway] Client {client_id} pong timeout")
                     break
+
+                if msg_type == "pong":
+                    last_ping = time.time()
+                    continue
 
                 # Handle client messages
                 response = self.handler.handle_message(msg)
